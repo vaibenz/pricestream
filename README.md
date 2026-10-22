@@ -1,6 +1,13 @@
 # pricestream
 
+[![ci](https://github.com/vaibenz/pricestream/actions/workflows/ci.yml/badge.svg)](https://github.com/vaibenz/pricestream/actions/workflows/ci.yml)
+[![live Coinbase feed](https://github.com/vaibenz/pricestream/actions/workflows/live-feed.yml/badge.svg)](https://github.com/vaibenz/pricestream/actions/workflows/live-feed.yml)
+
 Real time crypto prices, from exchange feeds to a mobile watchlist.
+
+<p align="center">
+  <img src="docs/demo.gif" width="300" alt="Watchlist streaming live prices, adding markets, and a price alert firing">
+</p>
 
 A Go ingestor reads Coinbase's public ticker feed and publishes to Redis. A Go gateway fans prices out to clients over WebSockets. A React Native app on iOS and Android shows a live watchlist with price alerts. The design goal is that slow clients and bursty markets never slow anyone else down: every hop keeps only the **latest price per symbol**, so backpressure turns into skipped stale ticks instead of growing queues.
 
@@ -10,6 +17,12 @@ Coinbase ws-feed ──> ingest ──> Redis ──> gateway ──WebSocket─
    heartbeat)         stall       + latest   coalescing,             reconnect + resubscribe,
                       detection   hash       frame cap               alerts
 ```
+
+| Live watchlist | Setting an alert | Alert fires | Light mode |
+|---|---|---|---|
+| <img src="docs/watchlist-dark.png" width="190"> | <img src="docs/alert-sheet-dark.png" width="190"> | <img src="docs/alert-fired-dark.png" width="190"> | <img src="docs/watchlist-light.png" width="190"> |
+
+The demo is the app's web build at phone size, driven by Playwright against the real gateway fed by the simulator (`scripts/record_demo.py`). The `live-feed` badge is a GitHub Actions job that connects to Coinbase's real ticker feed on every push and daily, and fails if ticks for every product do not arrive.
 
 ## Backend (Go)
 
@@ -26,6 +39,7 @@ Coinbase ws-feed ──> ingest ──> Redis ──> gateway ──WebSocket─
 * **Per client coalescing** (`internal/hub`). Each client holds at most one pending quote per symbol. A burst of 100 BTC ticks before the client's writer runs becomes one frame with the newest price. Memory per client is bounded by its watchlist, never by how far behind it is, and publishing never blocks on a client.
 * **Frame cap.** `MIN_INTERVAL` (default 100ms) limits how often a busy market wakes a phone's radio and UI. Updates arriving in between are coalesced.
 * **Slow clients** whose socket stops draining are disconnected after a write timeout rather than buffered forever.
+* **Connection limits.** A global cap (`MAX_CONNS`, answers 503) and a per client IP cap (`MAX_CONNS_PER_IP`, answers 429), both with `Retry-After`, so one client cannot exhaust the gateway. The IP comes from `X-Forwarded-For` only when `TRUST_PROXY=1`.
 * **No gap on restart.** The Redis pump subscribes first and only then loads the snapshot hash. The hub ignores quotes older than what it holds, so the overlap is harmless.
 * `GET /metrics` reports clients, coalesced updates, slow disconnects, and ingest to socket latency percentiles from a lock free histogram.
 
@@ -48,6 +62,7 @@ Symbols can also be passed up front: `/ws?symbols=BTC-USD,ETH-USD`.
 * **Stream client** (`app/src/lib/priceStream.ts`):
   * reconnects with jittered backoff, resetting once the server acknowledges
   * puts the whole watchlist in the connection URL, so a reconnect restores subscriptions with no extra round trip
+  * reconciles watchlist changes made while the socket was still connecting (on launch, storage loads after the first connect; recording the demo caught this)
   * replaces sockets that go silent, which is common when a phone switches networks
 * **Smooth rendering under high frequency updates.** Ticks are buffered and handed to React at most every 250ms. Rows are memoised, so a batch that only moves BTC re-renders only the BTC row. The green and red tick flash runs on the native animation driver, off the JS thread.
 * **Battery and data.** The socket closes when the app goes to the background and reopens in the foreground.
@@ -66,7 +81,7 @@ cd app && npm install
 EXPO_PUBLIC_GATEWAY_URL=ws://<your-LAN-IP>:8080/ws npx expo start
 ```
 
-Scan the QR code with Expo Go on a phone on the same network. The Android emulator reaches the host at `10.0.2.2`.
+Scan the QR code with Expo Go on a phone on the same network. The Android emulator reaches the host at `10.0.2.2`. For the web build (`npx expo start --web`), start the gateway with `ALLOWED_ORIGINS` set to the page's origin, since browsers send an Origin header and the gateway rejects cross origin sockets by default.
 
 Tests: `make test` runs the Go suite under the race detector (Redis integration tests need `REDIS_URL`; they are skipped without it) plus the app's typecheck and unit tests.
 
@@ -74,13 +89,13 @@ Tests: `make test` runs the Go suite under the race detector (Redis integration 
 
 `cmd/loadtest` opens N WebSocket clients and measures latency from the ingestor receiving a tick to a client decoding it. Setup: simulated feed at 150 ticks/s across 3 symbols, every client following all 3, and everything (Redis, ingestor, gateway and the load generator) on one 2 vCPU cloud VM.
 
-| Clients | Frame cap | Quotes delivered | Ingest to client p50 / p99 | Slow disconnects |
+| Clients | Frame cap | Quotes delivered | Ingest to client p50 / p90 / p99 | Slow disconnects |
 |---|---|---|---|---|
-| 100 | none | 13.6k/s | ≤2 ms / ≤10 ms | 0 |
-| 1,000 | none | 83.8k/s | ≤50 ms / ≤200 ms | 0 |
-| 1,000 | 100 ms | 29.4k/s | ≤20 ms / ≤100 ms | 0 |
+| 100 | none | 13.2k/s | 2 / 3 / 6 ms | 0 |
+| 1,000 | none | 90.7k/s | 40 / 80 / 150 ms | 0 |
+| 1,000 | 100 ms | 29.4k/s | 20 / 60 / 100 ms | 0 |
 
-Latencies are histogram bucket upper bounds. At 1,000 uncapped clients the box is CPU bound, since the load generator shares the two cores. Coalescing absorbs the shortfall (about 1.06M stale ticks skipped instead of queued), so every client still holds the latest price and nobody is disconnected.
+Percentiles are histogram bucket upper bounds (ten buckets per decade, so at most 25% high). At 1,000 uncapped clients the box is CPU bound, since the load generator shares the two cores. Coalescing absorbs the shortfall: stale ticks are skipped instead of queued, so every client still holds the latest price and nobody is disconnected. The load test runs from one IP, so start the gateway with `MAX_CONNS_PER_IP=0` to reproduce it.
 
 ## Limits and next steps
 
