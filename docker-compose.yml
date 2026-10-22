@@ -1,0 +1,38 @@
+# Full backend: Redis, one ingestor and one gateway on :8080.
+# SOURCE=coinbase streams real prices; SOURCE=sim runs offline.
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 20
+
+  ingest:
+    build:
+      context: .
+      args:
+        CMD: ingest
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      SOURCE: ${SOURCE:-coinbase}
+      PRODUCTS: ${PRODUCTS:-BTC-USD,ETH-USD,SOL-USD,DOGE-USD,AVAX-USD,LINK-USD}
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      args:
+        CMD: gateway
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MIN_INTERVAL: ${MIN_INTERVAL:-100ms}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
