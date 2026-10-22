@@ -36,7 +36,10 @@ func (s Sim) Run(ctx context.Context, out chan<- quote.Quote) error {
 	states := make(map[string]*state, len(s.Start))
 	symbols := make([]string, 0, len(s.Start))
 	for sym, p := range s.Start {
-		states[sym] = &state{price: p, open: p}
+		// Pretend the day opened a few percent away, so 24h change looks
+		// like a real market rather than starting at exactly 0%.
+		open := p * math.Exp(0.03*rng.NormFloat64())
+		states[sym] = &state{price: p, open: round(open)}
 		symbols = append(symbols, sym)
 	}
 	if len(symbols) == 0 {
@@ -76,4 +79,10 @@ func (s Sim) Run(ctx context.Context, out chan<- quote.Quote) error {
 	}
 }
 
-func round(p float64) float64 { return math.Round(p*100) / 100 }
+// round keeps four significant digits after the point for sub dollar coins.
+func round(p float64) float64 {
+	if p < 1 {
+		return math.Round(p*1e6) / 1e6
+	}
+	return math.Round(p*100) / 100
+}

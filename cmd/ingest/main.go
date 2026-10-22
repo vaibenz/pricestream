@@ -38,11 +38,17 @@ func run(log *slog.Logger) error {
 	var src source.Source
 	switch envOr("SOURCE", "coinbase") {
 	case "sim":
-		start := map[string]float64{}
-		for i, p := range products {
-			start[p] = 100 * float64(i+1)
+		known := map[string]float64{
+			"BTC-USD": 67_000, "ETH-USD": 2_600, "SOL-USD": 170, "DOGE-USD": 0.16,
+			"AVAX-USD": 28, "LINK-USD": 14, "XRP-USD": 0.58, "ADA-USD": 0.39,
 		}
-		start["BTC-USD"], start["ETH-USD"], start["SOL-USD"] = 67_000, 2_600, 170
+		start := map[string]float64{}
+		for _, p := range products {
+			start[p] = known[p]
+			if start[p] == 0 {
+				start[p] = 100
+			}
+		}
 		interval, _ := time.ParseDuration(envOr("SIM_INTERVAL", "200ms"))
 		src = source.Sim{Start: start, Interval: interval, Seed: uint64(time.Now().UnixNano())}
 	default:
