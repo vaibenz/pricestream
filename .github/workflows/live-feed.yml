@@ -1,0 +1,23 @@
+name: live-feed
+
+# Checks the ingestor against the real Coinbase Exchange feed. Runs on every
+# push, daily (to catch API changes), and on demand.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  coinbase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Stream real Coinbase ticks
+        env:
+          LIVE_COINBASE: "1"
+        run: go test -count=1 -v -run TestLiveCoinbaseFeed ./internal/source/
