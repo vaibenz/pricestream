@@ -7,19 +7,23 @@ import (
 	"time"
 )
 
-// Bucket upper bounds, roughly three per decade from 10µs to 10s. Quantiles
-// are reported as the upper bound of the bucket they land in, so they are
-// conservative by at most one bucket width.
+// Bucket upper bounds: ten log spaced steps per decade from 10µs to 100s.
+// Quantiles are reported as the upper bound of the bucket they land in, so
+// they overstate by at most one step (25%).
+var steps = []float64{1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8}
+
 var bounds = func() []time.Duration {
 	var b []time.Duration
 	for d := 10 * time.Microsecond; d <= 10*time.Second; d *= 10 {
-		b = append(b, d, 2*d, 5*d)
+		for _, s := range steps {
+			b = append(b, time.Duration(float64(d)*s))
+		}
 	}
 	return b
 }()
 
 type Histogram struct {
-	counts [32]atomic.Int64 // len(bounds)+1 overflow bucket
+	counts [72]atomic.Int64 // len(bounds)+1 overflow bucket
 	total  atomic.Int64
 	sumNs  atomic.Int64
 }
