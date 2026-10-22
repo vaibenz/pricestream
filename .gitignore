@@ -1,0 +1,6 @@
+/bin/
+*.out
+*.test
+.env
+coverage.*
+node_modules/
