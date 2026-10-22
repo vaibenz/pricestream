@@ -65,8 +65,8 @@ export function AlertSheet({ symbol, quote, alerts, theme, onCreate, onDelete, o
         <View style={[styles.sheet, { backgroundColor: theme.card }]}>
           <Text style={[styles.title, { color: theme.text }]}>{symbol} alerts</Text>
           <Text style={[styles.sub, { color: theme.muted }]}>
-            Now {quote ? formatPrice(quote.p) : '...'}. You get one alert when the price crosses
-            your target.
+            {quote ? `Now ${formatPrice(quote.p)}. ` : 'Waiting for a live price. '}
+            You get one alert when the price crosses your target.
           </Text>
 
           <View style={[styles.inputRow, { borderColor: theme.border }]}>
