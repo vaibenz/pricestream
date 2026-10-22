@@ -17,6 +17,7 @@ test:
 	cd app && npm test && npm run typecheck
 
 # Load test against a running gateway; run on the same host as the ingestor.
+# All clients share one IP, so start the gateway with MAX_CONNS_PER_IP=0.
 load:
 	go run ./cmd/loadtest -url ws://localhost:8080/ws -clients 1000 -duration 20s
 

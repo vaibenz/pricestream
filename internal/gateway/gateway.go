@@ -16,9 +16,11 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -43,6 +45,14 @@ type Config struct {
 	// OriginPatterns lists browser origins allowed to connect. Native
 	// apps send no Origin header and are always allowed.
 	OriginPatterns []string
+	// MaxConns caps open WebSockets on this gateway (503 beyond it), and
+	// MaxConnsPerIP caps them per client address (429), so one client
+	// cannot exhaust the gateway. Zero means no limit.
+	MaxConns      int
+	MaxConnsPerIP int
+	// TrustProxy takes the client address from X-Forwarded-For. Enable
+	// only behind a load balancer that sets that header itself.
+	TrustProxy bool
 }
 
 func (c *Config) defaults() {
@@ -67,11 +77,16 @@ type Server struct {
 	latency        metrics.Histogram
 	framesSent     atomic.Int64
 	slowDisconnect atomic.Int64
+	rejected       atomic.Int64
+
+	connMu sync.Mutex
+	conns  int
+	perIP  map[string]int
 }
 
 func New(h *hub.Hub, cfg Config, log *slog.Logger) *Server {
 	cfg.defaults()
-	return &Server{hub: h, cfg: cfg, log: log}
+	return &Server{hub: h, cfg: cfg, log: log, perIP: map[string]int{}}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -95,6 +110,7 @@ func (s *Server) serveMetrics(w http.ResponseWriter, _ *http.Request) {
 		"hub":                    s.hub.Stats(),
 		"frames_sent":            s.framesSent.Load(),
 		"slow_client_disconnect": s.slowDisconnect.Load(),
+		"rejected_connections":   s.rejected.Load(),
 		"ingest_to_socket":       s.latency.Summary(),
 	})
 }
@@ -117,6 +133,15 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	ip := s.clientIP(r)
+	if status, ok := s.admit(ip); !ok {
+		s.rejected.Add(1)
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, http.StatusText(status), status)
+		return
+	}
+	defer s.release(ip)
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns:  s.cfg.OriginPatterns,
 		CompressionMode: websocket.CompressionContextTakeover,
@@ -238,6 +263,45 @@ func (s *Server) send(ctx context.Context, conn *websocket.Conn, m serverMsg) er
 	wctx, cancel := context.WithTimeout(ctx, s.cfg.WriteTimeout)
 	defer cancel()
 	return conn.Write(wctx, websocket.MessageText, data)
+}
+
+// admit reserves a connection slot for ip, or reports which limit is full.
+func (s *Server) admit(ip string) (int, bool) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if s.cfg.MaxConns > 0 && s.conns >= s.cfg.MaxConns {
+		return http.StatusServiceUnavailable, false
+	}
+	if s.cfg.MaxConnsPerIP > 0 && s.perIP[ip] >= s.cfg.MaxConnsPerIP {
+		return http.StatusTooManyRequests, false
+	}
+	s.conns++
+	s.perIP[ip]++
+	return 0, true
+}
+
+func (s *Server) release(ip string) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	s.conns--
+	if s.perIP[ip]--; s.perIP[ip] <= 0 {
+		delete(s.perIP, ip)
+	}
+}
+
+func (s *Server) clientIP(r *http.Request) string {
+	if s.cfg.TrustProxy {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			// The left most entry is the original client.
+			first, _, _ := strings.Cut(fwd, ",")
+			return strings.TrimSpace(first)
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func parseSymbols(raw string, max int) ([]string, error) {

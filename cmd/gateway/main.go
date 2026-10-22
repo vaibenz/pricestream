@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -43,7 +44,15 @@ func run(log *slog.Logger) error {
 	if o := os.Getenv("ALLOWED_ORIGINS"); o != "" {
 		origins = strings.Split(o, ",")
 	}
-	gw := gateway.New(h, gateway.Config{MinInterval: minInterval, OriginPatterns: origins}, log)
+	maxConns, _ := strconv.Atoi(envOr("MAX_CONNS", "20000"))
+	maxPerIP, _ := strconv.Atoi(envOr("MAX_CONNS_PER_IP", "50"))
+	gw := gateway.New(h, gateway.Config{
+		MinInterval:    minInterval,
+		OriginPatterns: origins,
+		MaxConns:       maxConns,
+		MaxConnsPerIP:  maxPerIP,
+		TrustProxy:     os.Getenv("TRUST_PROXY") == "1",
+	}, log)
 
 	srv := &http.Server{
 		Addr:              ":" + envOr("PORT", "8080"),

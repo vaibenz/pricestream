@@ -157,6 +157,12 @@ func TestMinIntervalCoalescesBursts(t *testing.T) {
 	if len(m.Data) != 1 || m.Data[0].Price != 500 {
 		t.Fatalf("after burst = %+v", m)
 	}
+	// The counter is bumped just after the write returns, so give it a
+	// moment; a third frame would mean the burst was not coalesced.
+	deadline := time.Now().Add(time.Second)
+	for s.framesSent.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := s.framesSent.Load(); got != 2 {
 		t.Errorf("frames sent = %d, want 2", got)
 	}
@@ -189,5 +195,69 @@ func getJSON(t *testing.T, url string, v any) {
 	defer resp.Body.Close()
 	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestConnectionLimits(t *testing.T) {
+	_, s, srv := startServer(t, Config{MaxConns: 3, MaxConnsPerIP: 2})
+	dialStatus := func(fwd string) (int, *websocket.Conn) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		opts := &websocket.DialOptions{HTTPHeader: http.Header{}}
+		if fwd != "" {
+			opts.HTTPHeader.Set("X-Forwarded-For", fwd)
+		}
+		c, resp, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws", opts)
+		if err != nil {
+			return resp.StatusCode, nil
+		}
+		t.Cleanup(func() { c.CloseNow() })
+		return http.StatusSwitchingProtocols, c
+	}
+
+	// Without TrustProxy every test client is 127.0.0.1.
+	_, a := dialStatus("")
+	dialStatus("")
+	if code, _ := dialStatus(""); code != http.StatusTooManyRequests {
+		t.Errorf("third from one IP: %d, want 429", code)
+	}
+
+	// Closing a connection frees its slot.
+	a.Close(websocket.StatusNormalClosure, "")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if code, _ := dialStatus(""); code == http.StatusSwitchingProtocols {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slot was not released after close")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.rejected.Load() == 0 {
+		t.Error("rejections not counted")
+	}
+}
+
+func TestGlobalLimitAndTrustedProxy(t *testing.T) {
+	_, _, srv := startServer(t, Config{MaxConns: 2, MaxConnsPerIP: 1, TrustProxy: true})
+	dial := func(fwd string) int {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		h := http.Header{}
+		h.Set("X-Forwarded-For", fwd)
+		c, resp, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws",
+			&websocket.DialOptions{HTTPHeader: h})
+		if err != nil {
+			return resp.StatusCode
+		}
+		t.Cleanup(func() { c.CloseNow() })
+		return http.StatusSwitchingProtocols
+	}
+	if dial("203.0.113.1") != 101 || dial("203.0.113.2, 10.0.0.1") != 101 {
+		t.Fatal("distinct forwarded clients should both connect")
+	}
+	if code := dial("203.0.113.3"); code != http.StatusServiceUnavailable {
+		t.Errorf("over global limit: %d, want 503", code)
 	}
 }
