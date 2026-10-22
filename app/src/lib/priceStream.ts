@@ -129,10 +129,18 @@ export class PriceStream {
       : '';
     const s = this.createSocket(this.url + query);
     this.socket = s;
+    const inUrl = new Set(this.symbols);
 
     s.onopen = () => {
       if (this.socket !== s) return;
       this.setStatus('open');
+      // The watchlist may have changed while the socket was connecting
+      // (on launch it usually does: storage loads after the first connect).
+      // Those changes could not be sent yet, so reconcile now.
+      const added = [...this.symbols].filter((x) => !inUrl.has(x));
+      const removed = [...inUrl].filter((x) => !this.symbols.has(x));
+      if (added.length) this.send({ type: 'subscribe', symbols: added });
+      if (removed.length) this.send({ type: 'unsubscribe', symbols: removed });
       this.armStale();
     };
     s.onmessage = (event) => {

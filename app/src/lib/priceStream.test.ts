@@ -117,6 +117,19 @@ describe('PriceStream', () => {
     ]);
   });
 
+  test('watchlist changes made while connecting are sent once the socket opens', () => {
+    // On launch the stream starts before the saved watchlist has loaded.
+    stream.setSymbols(['DOGE-USD']);
+    stream.start();
+    stream.setSymbols(['BTC-USD', 'ETH-USD']); // arrives while connecting
+    assert.deepEqual(sockets[0].sent, [], 'nothing can be sent before open');
+    sockets[0].open();
+    assert.deepEqual(sockets[0].sent, [
+      { type: 'subscribe', symbols: ['BTC-USD', 'ETH-USD'] },
+      { type: 'unsubscribe', symbols: ['DOGE-USD'] },
+    ]);
+  });
+
   test('reconnects with backoff and restores subscriptions', () => {
     stream.setSymbols(['BTC-USD']);
     stream.start();
