@@ -1,0 +1,44 @@
+package metrics
+
+import (
+	"testing"
+	"time"
+)
+
+func TestQuantiles(t *testing.T) {
+	var h Histogram
+	for i := 0; i < 90; i++ {
+		h.Observe(150 * time.Microsecond) // lands in the 200µs bucket
+	}
+	for i := 0; i < 9; i++ {
+		h.Observe(3 * time.Millisecond) // 5ms bucket
+	}
+	h.Observe(40 * time.Millisecond) // 50ms bucket
+
+	cases := map[float64]time.Duration{
+		0.5:  200 * time.Microsecond,
+		0.9:  200 * time.Microsecond,
+		0.95: 5 * time.Millisecond,
+		0.99: 5 * time.Millisecond,
+		1.0:  50 * time.Millisecond,
+	}
+	for p, want := range cases {
+		if got := h.Quantile(p); got != want {
+			t.Errorf("p%v = %v, want %v", p*100, got, want)
+		}
+	}
+	if s := h.Summary(); s.Count != 100 || s.P99Ms != 5 {
+		t.Errorf("summary %+v", s)
+	}
+}
+
+func TestEmptyAndOverflow(t *testing.T) {
+	var h Histogram
+	if h.Quantile(0.5) != 0 || h.Summary().Count != 0 {
+		t.Error("empty histogram should report zero")
+	}
+	h.Observe(time.Minute)
+	if h.Quantile(0.5) < time.Minute {
+		t.Error("overflow bucket should report an unbounded quantile")
+	}
+}
