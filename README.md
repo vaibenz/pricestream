@@ -5,11 +5,13 @@
 
 Real time crypto prices, from exchange feeds to a mobile watchlist.
 
+I wanted to follow a price all the way from an exchange feed to a phone screen, and see where the latency and the failure points actually are along the way.
+
 <p align="center">
   <img src="docs/demo.gif" width="300" alt="Watchlist streaming live prices, adding markets, and a price alert firing">
 </p>
 
-A Go ingestor reads Coinbase's public ticker feed and publishes to Redis. A Go gateway fans prices out to clients over WebSockets. A React Native app on iOS and Android shows a live watchlist with price alerts. The design goal is that slow clients and bursty markets never slow anyone else down: every hop keeps only the **latest price per symbol**, so backpressure turns into skipped stale ticks instead of growing queues.
+A Go ingestor reads Coinbase's public ticker feed and publishes to Redis. A Go gateway fans prices out to clients over WebSockets. A React Native app on iOS and Android shows a live watchlist with price alerts. The design goal is that slow clients and bursty markets never slow anyone else down: every hop keeps only the latest price per symbol, so backpressure turns into skipped stale ticks instead of growing queues.
 
 ```
 Coinbase ws-feed ──> ingest ──> Redis ──> gateway ──WebSocket──> React Native app
@@ -36,11 +38,11 @@ The demo is the app's web build at phone size, driven by Playwright against the 
 
 ### `cmd/gateway`
 
-* **Per client coalescing** (`internal/hub`). Each client holds at most one pending quote per symbol. A burst of 100 BTC ticks before the client's writer runs becomes one frame with the newest price. Memory per client is bounded by its watchlist, never by how far behind it is, and publishing never blocks on a client.
-* **Frame cap.** `MIN_INTERVAL` (default 100ms) limits how often a busy market wakes a phone's radio and UI. Updates arriving in between are coalesced.
-* **Slow clients** whose socket stops draining are disconnected after a write timeout rather than buffered forever.
-* **Connection limits.** A global cap (`MAX_CONNS`, answers 503) and a per client IP cap (`MAX_CONNS_PER_IP`, answers 429), both with `Retry-After`, so one client cannot exhaust the gateway. The IP comes from `X-Forwarded-For` only when `TRUST_PROXY=1`.
-* **No gap on restart.** The Redis pump subscribes first and only then loads the snapshot hash. The hub ignores quotes older than what it holds, so the overlap is harmless.
+* Per client coalescing (`internal/hub`). Each client holds at most one pending quote per symbol. A burst of 100 BTC ticks before the client's writer runs becomes one frame with the newest price. Memory per client is bounded by its watchlist, never by how far behind it is, and publishing never blocks on a client.
+* Frame cap. `MIN_INTERVAL` (default 100ms) limits how often a busy market wakes a phone's radio and UI. Updates arriving in between are coalesced.
+* Slow clients whose socket stops draining are disconnected after a write timeout rather than buffered forever.
+* Connection limits. A global cap (`MAX_CONNS`, answers 503) and a per client IP cap (`MAX_CONNS_PER_IP`, answers 429), both with `Retry-After`, so one client cannot exhaust the gateway. The IP comes from `X-Forwarded-For` only when `TRUST_PROXY=1`.
+* No gap on restart. The Redis pump subscribes first and only then loads the snapshot hash. The hub ignores quotes older than what it holds, so the overlap is harmless.
 * `GET /metrics` reports clients, coalesced updates, slow disconnects, and ingest to socket latency percentiles from a lock free histogram.
 
 Protocol (JSON text frames):
@@ -59,14 +61,14 @@ Symbols can also be passed up front: `/ws?symbols=BTC-USD,ETH-USD`.
 
 ## App (React Native, Expo)
 
-* **Stream client** (`app/src/lib/priceStream.ts`):
+* Stream client (`app/src/lib/priceStream.ts`):
   * reconnects with jittered backoff, resetting once the server acknowledges
   * puts the whole watchlist in the connection URL, so a reconnect restores subscriptions with no extra round trip
   * reconciles watchlist changes made while the socket was still connecting (on launch, storage loads after the first connect; recording the demo caught this)
   * replaces sockets that go silent, which is common when a phone switches networks
-* **Smooth rendering under high frequency updates.** Ticks are buffered and handed to React at most every 250ms. Rows are memoised, so a batch that only moves BTC re-renders only the BTC row. The green and red tick flash runs on the native animation driver, off the JS thread.
-* **Battery and data.** The socket closes when the app goes to the background and reopens in the foreground.
-* **Price alerts.** Tap a row to set a target. Direction is inferred from the current price. A one shot alert fires a haptic and a banner. Alerts and the watchlist persist in AsyncStorage and are validated on load.
+* Smooth rendering under high frequency updates. Ticks are buffered and handed to React at most every 250ms. Rows are memoised, so a batch that only moves BTC re-renders only the BTC row. The green and red tick flash runs on the native animation driver, off the JS thread.
+* Battery and data. The socket closes when the app goes to the background and reopens in the foreground.
+* Price alerts. Tap a row to set a target. Direction is inferred from the current price. A one shot alert fires a haptic and a banner. Alerts and the watchlist persist in AsyncStorage and are validated on load.
 * Light and dark themes, accessibility labels on interactive elements.
 
 The stream client, alert logic and formatting are plain TypeScript with no React Native imports. They are tested under Node with a fake socket and mocked timers (`npm test`), covering batching, diffed subscriptions, backoff growth and reset, stall replacement, and stop.
@@ -97,8 +99,12 @@ Tests: `make test` runs the Go suite under the race detector (Redis integration 
 
 Percentiles are histogram bucket upper bounds (ten buckets per decade, so at most 25% high). At 1,000 uncapped clients the box is CPU bound, since the load generator shares the two cores. Coalescing absorbs the shortfall: stale ticks are skipped instead of queued, so every client still holds the latest price and nobody is disconnected. The load test runs from one IP, so start the gateway with `MAX_CONNS_PER_IP=0` to reproduce it.
 
-## Limits and next steps
+## What I'd do next
 
-* **One gateway** holds all its clients in memory. Horizontal scaling works as is (each gateway subscribes to Redis independently) behind a load balancer with WebSocket support.
-* **Prices are float64.** That is fine for display. Anything that settles money should carry exact decimals end to end.
-* **Push notifications** for alerts while the app is closed would need the alert rules on the server and a push service such as APNs or FCM. Today, alerts only fire while the app is open.
+* One gateway holds all its clients in memory. Horizontal scaling works as is (each gateway subscribes to Redis independently) behind a load balancer with WebSocket support.
+* Prices are float64. That is fine for display. Anything that settles money should carry exact decimals end to end.
+* Push notifications for alerts while the app is closed would need the alert rules on the server and a push service such as APNs or FCM. Today, alerts only fire while the app is open.
+
+---
+
+If something here is unclear, broken, or just wrong, feel free to open an issue. I'm always happy to chat about it.
